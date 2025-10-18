@@ -1,0 +1,379 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+# Reading in Libraries
+```{r}
+library(corrplot)
+library(dplyr)
+library(forcats)
+library(ggplot2)
+library(lubridate)
+library(PerformanceAnalytics)
+library(scales)
+library(tidyverse)
+library(VGAM)
+library(MASS)
+library(robustbase)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+```
+
+# Reading in Dataset
+```{r}
+arrest <- read.csv("NYPD_Arrest_Data__Year_to_Date_.csv")
+```
+
+# Inspecting the Data
+```{r}
+dim(arrest)
+names(arrest)
+glimpse(arrest)
+head(arrest)
+summary(arrest)
+```
+
+```{r}
+num_cols <- arrest[, c(3,5,7,10,11,15,16,17,18)]
+num_cols <- num_cols[sapply(num_cols, is.numeric)]
+
+for (col in names(num_cols)) {
+  hist(num_cols[[col]], main = paste("Histogram of", col), xlab = col)
+}
+```
+
+# Data Cleaning
+```{r}
+colSums(is.na(arrest)) # Noticed 10 missing values in KY_CD
+
+arrest <- arrest %>% drop_na(KY_CD) # Dropped the rows
+```
+# Removing Duplicates
+```{r}
+nrow(arrest) - nrow(distinct(arrest))
+```
+
+# Converting to appropriate data types
+```{r}
+arrest <- arrest %>%
+  mutate(
+    ARREST_DATE = mdy(ARREST_DATE),
+    
+    LAW_CAT_CD = case_when(
+      LAW_CAT_CD %in% c("F","FELONY") ~ "Felony",
+      LAW_CAT_CD %in% c("M","MISDEMEANOR") ~ "Misdemeanor",
+      LAW_CAT_CD %in% c("V","VIOLATION") ~ "Violation",
+      TRUE ~ NA_character_
+    ) %>% factor(levels = c("Felony","Misdemeanor","Violation")),
+
+    AGE_GROUP = AGE_GROUP %>%
+      fct_recode(
+        "<18" = "<18", "18-24" = "18-24", "25-44" = "25-44",
+        "45-64" = "45-64", "65+" = "65+"
+      ) %>%
+      fct_relevel("<18","18-24","25-44","45-64","65+"),
+
+    PERP_SEX  = factor(PERP_SEX, levels = c("M","F","U")),
+    PERP_RACE = factor(PERP_RACE),
+    
+    LAW_CAT_CD = fct_na_value_to_level(LAW_CAT_CD, level = "Other Authority"),
+
+    ARREST_BORO = recode(ARREST_BORO,
+                         B = "BRONX", K = "BROOKLYN", M = "MANHATTAN",
+                         Q = "QUEENS", S = "STATEN ISLAND", .default = NA_character_) %>%
+                  factor(levels = c("MANHATTAN","BRONX","BROOKLYN","QUEENS","STATEN ISLAND")),
+
+    Latitude  = ifelse(is.na(Latitude)  | Latitude  == 0, NA_real_, Latitude),
+    Longitude = ifelse(is.na(Longitude) | Longitude == 0, NA_real_, Longitude),
+
+    Latitude  = ifelse(Latitude  < 40 | Latitude  > 42, NA_real_, Latitude),
+    Longitude = ifelse(Longitude > -71 | Longitude < -75, NA_real_, Longitude)
+  )
+```
+
+# Descriptive Statistics
+
+```{r}
+# Arrests per Borough
+arrest %>%
+  count(ARREST_BORO, sort = TRUE)
+```
+
+
+```{r}
+# Top 10 Offense Descriptions
+arrest %>%
+  count(OFNS_DESC, sort = TRUE) %>%
+  head(10)
+```
+
+```{r}
+arrest <- arrest %>%
+  mutate(month = floor_date(ARREST_DATE, "month"),
+         dow = wday(ARREST_DATE, label = TRUE))
+
+# Monthly volume
+ggplot(arrest, aes(month)) +
+  geom_bar(fill="orange") +
+  labs(title = "Arrests per Month", x = NULL, y = "Count") +
+  theme_minimal()
+
+# Monthly mix by severity
+ggplot(arrest, aes(month, fill = LAW_CAT_CD)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Monthly Arrest Mix (Felony/Misd/Violation)", x = NULL, y = "Proportion", fill = "Law") +
+  theme_minimal()
+
+# Day-of-week pattern
+ggplot(arrest, aes(dow)) +
+  geom_bar(fill="blue") +
+  labs(title = "Arrests by Day of Week", x = NULL, y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+topN <- 15
+arrest %>%
+  count(OFNS_DESC, sort = TRUE) %>%
+  slice_head(n = topN) %>%
+  mutate(OFNS_DESC = forcats::fct_reorder(OFNS_DESC, n)) %>%
+  ggplot(aes(OFNS_DESC, n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = paste("Top", topN, "Offence Descriptions"), x = NULL, y = "Count") +
+  theme_minimal()
+
+# Borough x law category (proportions)
+ggplot(arrest, aes(ARREST_BORO, fill = LAW_CAT_CD)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Borough Mix by Law Category", x = "Borough", y = "Proportion", fill = "Law") +
+  theme_minimal()
+
+```
+
+```{r}
+# Age vs law category (proportion)
+ggplot(arrest, aes(AGE_GROUP, fill = LAW_CAT_CD)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Age Group vs Law Category", x = "Age Group", y = "Proportion") +
+  theme_minimal()
+
+# Race mix by borough
+arrest %>%
+  filter(!is.na(PERP_RACE), PERP_RACE != "") %>%
+  ggplot(aes(ARREST_BORO, fill = PERP_RACE)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Perpetrator Race Mix by Borough", x = "Borough", y = "Proportion", fill = "Race") +
+  theme_minimal()
+```
+
+```{r}
+violent <- c("ROBBERY", "FELONY ASSAULT", "ASSAULT 3 & RELATED OFFENSES",
+             "RAPE", "SEX arrestS", "DANGEROUS WEAPONS", "OFFENSES AGAINST THE PERSON",
+             "MURDER & NON-NEGL. MANSLAUGHTE", "HARRASSMENT 2",
+             "KIDNAPPING & RELATED OFFENSES", "HOMICIDE-NEGLIGENT,UNCLASSIFIE",
+             "HOMICIDE-NEGLIGENT-VEHICLE", "UNLAWFUL POSS. WEAP. ON SCHOOL")
+
+property <- c("PETIT LARCENY", "CRIMINAL TRESPASS", "BURGLARY",
+              "GRAND LARCENY", "ARSON", "OTHER OFFENSES RELATED TO THEFT",
+              "CRIMINAL MISCHIEF & RELATED OF", "POSSESSION OF STOLEN PROPERTY",
+              "GRAND LARCENY OF MOTOR VEHICLE", "BURGLAR'S TOOLS", "UNAUTHORIZED USE OF A VEHICLE",
+              "JOSTLING")
+
+morality <- c("DANGEROUS DRUGS", "PROSTITUTION & RELATED OFFENSES",
+              "ALCOHOLIC BEVERAGE CONTROL LAW", "CANNABIS RELATED OFFENSES",
+              "GAMBLING", "LOITERING/GAMBLING (CARDS, DIC)",
+              "DISORDERLY CONDUCT", "DISRUPTION OF A RELIGIOUS SERV", "CHILD ABANDONMENT/NON SUPPORT 1", "OFFENSES RELATED TO CHILDREN")
+
+traffic <- c("MOVING INFRACTIONS", "VEHICLE AND TRAFFIC LAWS",
+             "OTHER TRAFFIC INFRACTION", "INTOXICATED & IMPAIRED DRIVING",
+             "INTOXICATED/IMPAIRED DRIVING")
+
+white_collar <- c("FORGERY", "FRAUDS", "FRAUDULENT ACCOSTING",
+                  "THEFT-FRAUD", "OFFENSES INVOLVING FRAUD")
+
+arrest$CRIME_TYPE <- case_when(
+  arrest$OFNS_DESC %in% violent ~ "violent",
+  arrest$OFNS_DESC %in% property ~ "property",
+  arrest$OFNS_DESC %in% morality ~ "morality",
+  arrest$OFNS_DESC %in% traffic ~ "traffic",
+  arrest$OFNS_DESC %in% white_collar ~ "white-collar",
+  TRUE ~ "other"   
+)
+
+arrest$CRIME_TYPE <- factor(arrest$CRIME_TYPE,
+                            levels = c("violent", "property", 
+                                       "morality", "traffic", 
+                                       "white-collar", "other"))
+```
+
+
+```{r}
+#Multiple Correspondence Analysis
+
+#Import libraries
+library(dplyr)
+library(FactoMineR)
+library(factoextra)
+library(stats)
+library(rrcov)
+library(umap)
+library(knitr)
+
+```
+
+```{r}
+
+set.seed(123)
+arrest_sample <- arrest %>% sample_n(1500)
+
+ 
+X_cat <- arrest_sample %>%
+  dplyr::select(PERP_RACE, PERP_SEX, AGE_GROUP, 
+                ARREST_BORO, OFNS_DESC, LAW_CAT_CD, CRIME_TYPE) %>%
+  dplyr::mutate(across(everything(), as.factor))
+
+```
+
+```{r}
+str(arrest)
+```
+
+
+```{r}
+view(arrest)
+```
+
+
+#Multiple Correspondence Analysis
+```{r}
+res.mca <- MCA(X_cat, graph = FALSE) #MCA
+fviz_screeplot(res.mca, addlabels = TRUE, ylim = c(0, 20)) #Produce screeplot
+```
+
+
+
+
+
+
+
+```{r}
+# Compute robust estimates of mean and covariance using Minimum Covariance Determinant (MCD)
+mcd <- covMcd(coords)
+
+# Calculate robust Mahalanobis distances for each observation
+mahal_robust <- mahalanobis(coords, mcd$center, mcd$cov)
+
+# Define the 99th percentile as the cutoff threshold for outliers
+cutoff <- quantile(mahal_robust, 0.99)
+
+# Flag points whose robust Mahalanobis distance exceeds the cutoff
+outlier_flag <- mahal_robust > cutoff
+
+# Plot MCA coordinates
+plot(coords[,1], coords[,2],
+     col = ifelse(outlier_flag, "red", "black"),  # red = outlier, black = inlier
+     pch = ifelse(outlier_flag, 19, 1),           # filled circle for outliers
+     main = "Outlier Detection (Robust Mahalanobis)",
+     xlab = "MCA Dim 1", ylab = "MCA Dim 2")
+
+# Add legend to indicate which points are inliers/outliers
+legend("topright", legend=c("Inliers", "Outliers"), col=c("black","red"), pch=c(1,19))
+
+# Remove detected outliers from both coordinate matrix and original data
+coords_clean <- coords[!outlier_flag, ]
+data_clean <- arrest_sample[!outlier_flag, ]
+
+# Use silhouette method to determine optimal number of clusters
+fviz_nbclust(coords_clean, FUN = hcut, method = "silhouette")
+
+```
+
+
+```{r}
+#Plot dendogram based on smaller sample
+set.seed(123)
+sub_idx <- sample(1:nrow(umap_coords), 100) 
+hc_sub <- hclust(dist(umap_coords[sub_idx, ]), method = "ward.D2")
+fviz_dend(hc_sub, k = 6, cex = 0.8, rect = TRUE)
+```
+
+```{r}
+# Apply UMAP for nonlinear dimensionality reduction on cleaned coordinates
+umap_coords <- umap(coords_clean)$layout
+
+# Perform hierarchical clustering using Ward
+hc <- hclust(dist(umap_coords), method = "ward.D2")
+
+# Cut the dendrogram into 6 clusters (k = 6)
+clusters <- cutree(hc, k = 6)
+
+# Assign cluster labels to the cleaned dataset
+data_clean$Cluster <- as.factor(clusters)
+
+# Visualize clusters on the MCA coordinate space
+fviz_cluster(list(data = coords_clean, cluster = data_clean$Cluster),
+             geom = "point",          # display points
+             ellipse.type = "convex", # draw convex hulls around clusters
+             main = "Hierarchical Clusters on MCA space")
+
+```
+
+
+```{r}
+# Define categorical variables to summarise across clusters
+vars <- c("ARREST_BORO", "CRIME_TYPE", "PERP_RACE", "AGE_GROUP", "PERP_SEX")
+
+out_list <- lapply(vars, function(v) {
+  # Convert counts to row percentages
+  tab <- prop.table(table(data_clean$Cluster, data_clean[[v]]), 1) * 100
+  tab_df <- as.data.frame.matrix(round(tab, 1))
+  
+  # Add Cluster columns to make it easier to read/print
+  tab_df <- tibble::rownames_to_column(tab_df, "Cluster")
+  
+  # Label clusters
+  tab_df <- tab_df %>%
+    mutate(Cluster = paste("Cluster", Cluster))
+  
+  # Return list with variable name and formatted table
+  list(name = v, data = tab_df)
+})
+
+# Print all summary tables
+for (i in seq_along(out_list)) {
+  print(
+    kable(out_list[[i]]$data, 
+          caption = paste(out_list[[i]]$name, "by Cluster (%)")) %>% 
+      kable_styling(full_width = TRUE, position = "center")
+  )
+  cat("\n\n")  # Add spacing
+}
+
+```
+```{r}
+# Fit a multinomial logistic regression model using VGAM
+fit_mnl <- vgam(
+  CRIME_TYPE ~ ARREST_BORO + AGE_GROUP + PERP_SEX + PERP_RACE,
+  family = multinomial(refLevel = "violent"),  # "violent" as baseline class
+  data = arrest                               
+)
+
+
+```
+
+```{r}
+saveRDS(fit_mnl, file = "fit_mnl.rds")   # multinomial vgam model
+saveRDS(arrest,  file = "arrest.rds")    # training data frame
+```
+
+
+
+
+
+
